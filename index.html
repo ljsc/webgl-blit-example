@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Network Telemetry Visualization - WebGL Effects Demo</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #1a1a2e;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    .container {
+      position: relative;
+    }
+
+    #mainCanvas {
+      background: #16213e;
+      border-radius: 8px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+      cursor: grab;
+    }
+
+    #mainCanvas:active {
+      cursor: grabbing;
+    }
+
+    .legend {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: rgba(22, 33, 62, 0.9);
+      padding: 12px 16px;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .legend-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .legend-dot.normal {
+      background: #4a90a4;
+    }
+
+    .legend-dot.active {
+      background: #e94560;
+      box-shadow: 0 0 8px #e94560;
+    }
+
+    /* Hidden WebGL canvas for offscreen rendering */
+    #glCanvas {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <canvas id="mainCanvas" width="900" height="600"></canvas>
+    <canvas id="glCanvas" width="128" height="128"></canvas>
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-dot normal"></div>
+        <span>Normal Node</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot active"></div>
+        <span>Active Node (with issue)</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ============================================================
+    // 3D Simplex Noise GLSL Implementation (Ashima Arts)
+    // ============================================================
+    const noiseGLSL = `
+      vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+      vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+      float snoise(vec3 v) {
+        const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+        // First corner
+        vec3 i  = floor(v + dot(v, C.yyy));
+        vec3 x0 = v - i + dot(i, C.xxx);
+
+        // Other corners
+        vec3 g = step(x0.yzx, x0.xyz);
+        vec3 l = 1.0 - g;
+        vec3 i1 = min(g.xyz, l.zxy);
+        vec3 i2 = max(g.xyz, l.zxy);
+
+        vec3 x1 = x0 - i1 + C.xxx;
+        vec3 x2 = x0 - i2 + C.yyy;
+        vec3 x3 = x0 - D.yyy;
+
+        // Permutations
+        i = mod289(i);
+        vec4 p = permute(permute(permute(
+                  i.z + vec4(0.0, i1.z, i2.z, 1.0))
+                + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+                + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+        // Gradients: 7x7 points over a square, mapped onto an octahedron
+        float n_ = 0.142857142857;
+        vec3 ns = n_ * D.wyz - D.xzx;
+
+        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+        vec4 x_ = floor(j * ns.z);
+        vec4 y_ = floor(j - 7.0 * x_);
+
+        vec4 x = x_ * ns.x + ns.yyyy;
+        vec4 y = y_ * ns.x + ns.yyyy;
+        vec4 h = 1.0 - abs(x) - abs(y);
+
+        vec4 b0 = vec4(x.xy, y.xy);
+        vec4 b1 = vec4(x.zw, y.zw);
+
+        vec4 s0 = floor(b0) * 2.0 + 1.0;
+        vec4 s1 = floor(b1) * 2.0 + 1.0;
+        vec4 sh = -step(h, vec4(0.0));
+
+        vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+        vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+        vec3 p0 = vec3(a0.xy, h.x);
+        vec3 p1 = vec3(a0.zw, h.y);
+        vec3 p2 = vec3(a1.xy, h.z);
+        vec3 p3 = vec3(a1.zw, h.w);
+
+        // Normalise gradients
+        vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+
+        // Mix final noise value
+        vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+        m = m * m;
+        return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+      }
+    `;
+
+    // ============================================================
+    // WebGL Shader Setup
+    // ============================================================
+    const vertexShaderSource = `
+      attribute vec2 a_position;
+      varying vec2 v_uv;
+
+      void main() {
+        v_uv = a_position * 0.5 + 0.5;
+        gl_Position = vec4(a_position, 0.0, 1.0);
+      }
+    `;
+
+    const fragmentShaderSource = `
+      precision highp float;
+
+      varying vec2 v_uv;
+      uniform float u_time;
+      uniform float u_noiseScale;
+      uniform float u_noiseAmplitude;
+      uniform float u_ringRadius;
+      uniform float u_ringThickness;
+      uniform vec3 u_color;
+
+      ${noiseGLSL}
+
+      void main() {
+        // Convert UV to centered coordinates (-1 to 1)
+        vec2 centered = v_uv * 2.0 - 1.0;
+
+        // Get polar coordinates
+        float dist = length(centered);
+        float angle = atan(centered.y, centered.x);
+
+        // Sample noise using angle mapped to circle in noise space
+        // This ensures seamless looping around the ring
+        vec3 noiseCoord = vec3(
+          cos(angle) * u_noiseScale,
+          sin(angle) * u_noiseScale,
+          u_time
+        );
+        float noise = snoise(noiseCoord);
+
+        // Add a second octave for more detail
+        vec3 noiseCoord2 = vec3(
+          cos(angle * 2.0) * u_noiseScale * 2.0,
+          sin(angle * 2.0) * u_noiseScale * 2.0,
+          u_time * 1.5
+        );
+        noise += snoise(noiseCoord2) * 0.5;
+        noise /= 1.5; // Normalize
+
+        // Distort the ring radius based on noise
+        float distortedRadius = u_ringRadius + noise * u_noiseAmplitude;
+
+        // Calculate ring with soft edges
+        float ringDist = abs(dist - distortedRadius);
+        float ring = 1.0 - smoothstep(0.0, u_ringThickness, ringDist);
+
+        // Add glow effect
+        float glowDist = abs(dist - distortedRadius);
+        float glow = exp(-glowDist * 8.0) * 0.6;
+
+        // Combine ring and glow
+        float alpha = ring + glow;
+        alpha = clamp(alpha, 0.0, 1.0);
+
+        // Slight color variation based on noise
+        vec3 finalColor = u_color + vec3(noise * 0.1, noise * 0.05, 0.0);
+
+        gl_FragColor = vec4(finalColor, alpha);
+      }
+    `;
+
+    // ============================================================
+    // WebGL Initialization
+    // ============================================================
+    class WebGLEffectRenderer {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.gl = canvas.getContext('webgl', {
+          alpha: true,
+          premultipliedAlpha: false
+        });
+
+        if (!this.gl) {
+          throw new Error('WebGL not supported');
+        }
+
+        this.initShaders();
+        this.initBuffers();
+        this.initUniforms();
+      }
+
+      initShaders() {
+        const gl = this.gl;
+
+        // Compile vertex shader
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertexShader, vertexShaderSource);
+        gl.compileShader(vertexShader);
+
+        if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+          console.error('Vertex shader error:', gl.getShaderInfoLog(vertexShader));
+        }
+
+        // Compile fragment shader
+        const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fragmentShader, fragmentShaderSource);
+        gl.compileShader(fragmentShader);
+
+        if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+          console.error('Fragment shader error:', gl.getShaderInfoLog(fragmentShader));
+        }
+
+        // Link program
+        this.program = gl.createProgram();
+        gl.attachShader(this.program, vertexShader);
+        gl.attachShader(this.program, fragmentShader);
+        gl.linkProgram(this.program);
+
+        if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+          console.error('Program link error:', gl.getProgramInfoLog(this.program));
+        }
+
+        gl.useProgram(this.program);
+      }
+
+      initBuffers() {
+        const gl = this.gl;
+
+        // Full-screen quad
+        const positions = new Float32Array([
+          -1, -1,
+           1, -1,
+          -1,  1,
+           1,  1,
+        ]);
+
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        const positionLoc = gl.getAttribLocation(this.program, 'a_position');
+        gl.enableVertexAttribArray(positionLoc);
+        gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+      }
+
+      initUniforms() {
+        const gl = this.gl;
+        this.uniforms = {
+          time: gl.getUniformLocation(this.program, 'u_time'),
+          noiseScale: gl.getUniformLocation(this.program, 'u_noiseScale'),
+          noiseAmplitude: gl.getUniformLocation(this.program, 'u_noiseAmplitude'),
+          ringRadius: gl.getUniformLocation(this.program, 'u_ringRadius'),
+          ringThickness: gl.getUniformLocation(this.program, 'u_ringThickness'),
+          color: gl.getUniformLocation(this.program, 'u_color'),
+        };
+      }
+
+      render(time, options = {}) {
+        const gl = this.gl;
+        const {
+          noiseScale = 2.0,
+          noiseAmplitude = 0.08,
+          ringRadius = 0.7,
+          ringThickness = 0.06,
+          color = [0.91, 0.27, 0.38], // #e94560
+        } = options;
+
+        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        gl.uniform1f(this.uniforms.time, time);
+        gl.uniform1f(this.uniforms.noiseScale, noiseScale);
+        gl.uniform1f(this.uniforms.noiseAmplitude, noiseAmplitude);
+        gl.uniform1f(this.uniforms.ringRadius, ringRadius);
+        gl.uniform1f(this.uniforms.ringThickness, ringThickness);
+        gl.uniform3fv(this.uniforms.color, color);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
+
+    // ============================================================
+    // Graph Data & Node Management
+    // ============================================================
+    const nodes = [
+      { id: 0, x: 150, y: 150, radius: 24, label: 'Gateway', active: false },
+      { id: 1, x: 350, y: 100, radius: 20, label: 'Auth', active: true },
+      { id: 2, x: 550, y: 150, radius: 22, label: 'API', active: false },
+      { id: 3, x: 750, y: 100, radius: 18, label: 'Cache', active: false },
+      { id: 4, x: 200, y: 300, radius: 20, label: 'DB-1', active: true },
+      { id: 5, x: 400, y: 280, radius: 20, label: 'DB-2', active: false },
+      { id: 6, x: 600, y: 300, radius: 20, label: 'Queue', active: true },
+      { id: 7, x: 750, y: 280, radius: 18, label: 'Worker-1', active: false },
+      { id: 8, x: 300, y: 450, radius: 22, label: 'Logger', active: false },
+      { id: 9, x: 500, y: 480, radius: 20, label: 'Metrics', active: false },
+      { id: 10, x: 700, y: 450, radius: 24, label: 'Monitor', active: true },
+    ];
+
+    const connections = [
+      [0, 1], [0, 4],
+      [1, 2], [1, 5],
+      [2, 3], [2, 6],
+      [3, 7],
+      [4, 5], [4, 8],
+      [5, 6], [5, 9],
+      [6, 7], [6, 10],
+      [7, 10],
+      [8, 9],
+      [9, 10],
+    ];
+
+    // ============================================================
+    // Main Application
+    // ============================================================
+    class NetworkVisualization {
+      constructor() {
+        this.mainCanvas = document.getElementById('mainCanvas');
+        this.ctx = this.mainCanvas.getContext('2d');
+        this.glCanvas = document.getElementById('glCanvas');
+
+        this.glRenderer = new WebGLEffectRenderer(this.glCanvas);
+
+        this.draggedNode = null;
+        this.dragOffset = { x: 0, y: 0 };
+
+        this.setupEventListeners();
+        this.animate(0);
+      }
+
+      setupEventListeners() {
+        this.mainCanvas.addEventListener('mousedown', this.onMouseDown.bind(this));
+        this.mainCanvas.addEventListener('mousemove', this.onMouseMove.bind(this));
+        this.mainCanvas.addEventListener('mouseup', this.onMouseUp.bind(this));
+        this.mainCanvas.addEventListener('mouseleave', this.onMouseUp.bind(this));
+
+        // Touch support
+        this.mainCanvas.addEventListener('touchstart', this.onTouchStart.bind(this));
+        this.mainCanvas.addEventListener('touchmove', this.onTouchMove.bind(this));
+        this.mainCanvas.addEventListener('touchend', this.onMouseUp.bind(this));
+      }
+
+      getMousePos(e) {
+        const rect = this.mainCanvas.getBoundingClientRect();
+        return {
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top
+        };
+      }
+
+      getTouchPos(e) {
+        const rect = this.mainCanvas.getBoundingClientRect();
+        const touch = e.touches[0];
+        return {
+          x: touch.clientX - rect.left,
+          y: touch.clientY - rect.top
+        };
+      }
+
+      findNodeAt(pos) {
+        // Search in reverse to get topmost node first
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          const node = nodes[i];
+          const dx = pos.x - node.x;
+          const dy = pos.y - node.y;
+          if (dx * dx + dy * dy <= node.radius * node.radius) {
+            return node;
+          }
+        }
+        return null;
+      }
+
+      onMouseDown(e) {
+        const pos = this.getMousePos(e);
+        const node = this.findNodeAt(pos);
+        if (node) {
+          this.draggedNode = node;
+          this.dragOffset = {
+            x: pos.x - node.x,
+            y: pos.y - node.y
+          };
+        }
+      }
+
+      onMouseMove(e) {
+        if (this.draggedNode) {
+          const pos = this.getMousePos(e);
+          this.draggedNode.x = pos.x - this.dragOffset.x;
+          this.draggedNode.y = pos.y - this.dragOffset.y;
+
+          // Clamp to canvas bounds
+          const r = this.draggedNode.radius;
+          this.draggedNode.x = Math.max(r, Math.min(this.mainCanvas.width - r, this.draggedNode.x));
+          this.draggedNode.y = Math.max(r, Math.min(this.mainCanvas.height - r, this.draggedNode.y));
+        }
+      }
+
+      onMouseUp() {
+        this.draggedNode = null;
+      }
+
+      onTouchStart(e) {
+        e.preventDefault();
+        const pos = this.getTouchPos(e);
+        const node = this.findNodeAt(pos);
+        if (node) {
+          this.draggedNode = node;
+          this.dragOffset = {
+            x: pos.x - node.x,
+            y: pos.y - node.y
+          };
+        }
+      }
+
+      onTouchMove(e) {
+        e.preventDefault();
+        if (this.draggedNode) {
+          const pos = this.getTouchPos(e);
+          this.draggedNode.x = pos.x - this.dragOffset.x;
+          this.draggedNode.y = pos.y - this.dragOffset.y;
+
+          const r = this.draggedNode.radius;
+          this.draggedNode.x = Math.max(r, Math.min(this.mainCanvas.width - r, this.draggedNode.x));
+          this.draggedNode.y = Math.max(r, Math.min(this.mainCanvas.height - r, this.draggedNode.y));
+        }
+      }
+
+      drawConnections() {
+        const ctx = this.ctx;
+        ctx.strokeStyle = '#3a506b';
+        ctx.lineWidth = 2;
+
+        for (const [fromId, toId] of connections) {
+          const from = nodes[fromId];
+          const to = nodes[toId];
+
+          ctx.beginPath();
+          ctx.moveTo(from.x, from.y);
+          ctx.lineTo(to.x, to.y);
+          ctx.stroke();
+        }
+      }
+
+      drawNode(node) {
+        const ctx = this.ctx;
+
+        // Node fill
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+        ctx.fillStyle = node.active ? '#e94560' : '#4a90a4';
+        ctx.fill();
+
+        // Subtle inner highlight
+        const gradient = ctx.createRadialGradient(
+          node.x - node.radius * 0.3,
+          node.y - node.radius * 0.3,
+          0,
+          node.x,
+          node.y,
+          node.radius
+        );
+        gradient.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Label
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '11px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.label, node.x, node.y + node.radius + 14);
+      }
+
+      drawActiveEffect(node, time) {
+        // Size of the WebGL canvas should cover the effect area
+        const effectRadius = node.radius + 16; // Extra space for the effect
+        const effectSize = effectRadius * 2 + 20; // Add padding for glow
+
+        // Resize GL canvas if needed
+        if (this.glCanvas.width !== effectSize || this.glCanvas.height !== effectSize) {
+          this.glCanvas.width = effectSize;
+          this.glCanvas.height = effectSize;
+        }
+
+        // Render the effect
+        this.glRenderer.render(time * 0.5, {
+          noiseScale: 2.5,
+          noiseAmplitude: 0.12,
+          ringRadius: effectRadius / (effectSize / 2), // Normalize to -1 to 1 space
+          ringThickness: 0.04,
+          color: [0.91, 0.27, 0.38]
+        });
+
+        // Blit to main canvas
+        const blitX = node.x - effectSize / 2;
+        const blitY = node.y - effectSize / 2;
+        this.ctx.drawImage(this.glCanvas, blitX, blitY);
+      }
+
+      render(time) {
+        const ctx = this.ctx;
+
+        // Clear canvas
+        ctx.fillStyle = '#16213e';
+        ctx.fillRect(0, 0, this.mainCanvas.width, this.mainCanvas.height);
+
+        // Draw connections first (behind nodes)
+        this.drawConnections();
+
+        // Draw active effects (behind nodes but above connections)
+        for (const node of nodes) {
+          if (node.active) {
+            this.drawActiveEffect(node, time);
+          }
+        }
+
+        // Draw all nodes
+        for (const node of nodes) {
+          this.drawNode(node);
+        }
+      }
+
+      animate(timestamp) {
+        const time = timestamp / 1000; // Convert to seconds
+        this.render(time);
+        requestAnimationFrame(this.animate.bind(this));
+      }
+    }
+
+    // Start the application
+    const app = new NetworkVisualization();
+  </script>
+</body>
+</html>
