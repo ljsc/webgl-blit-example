@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Network Telemetry Visualization - WebGL Effects Demo</title>
+  <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19/dist/lil-gui.umd.min.js"></script>
   <style>
     * {
       margin: 0;
@@ -390,6 +391,35 @@
     ];
 
     // ============================================================
+    // Effect Configuration (controlled by lil-gui)
+    // ============================================================
+    const effectConfig = {
+      noiseScale: 2.5,
+      noiseAmplitude: 0.12,
+      ringRadius: 0.85,
+      ringThickness: 0.04,
+      color: '#e94560',
+    };
+
+    // Helper to convert hex color to RGB array
+    function hexToRgb(hex) {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return result ? [
+        parseInt(result[1], 16) / 255,
+        parseInt(result[2], 16) / 255,
+        parseInt(result[3], 16) / 255
+      ] : [0.91, 0.27, 0.38];
+    }
+
+    // Initialize lil-gui
+    const gui = new lil.GUI({ title: 'Effect Controls' });
+    gui.add(effectConfig, 'noiseScale', 0.5, 8.0, 0.1).name('Noise Scale');
+    gui.add(effectConfig, 'noiseAmplitude', 0.0, 0.5, 0.01).name('Noise Amplitude');
+    gui.add(effectConfig, 'ringRadius', 0.3, 1.2, 0.01).name('Ring Radius');
+    gui.add(effectConfig, 'ringThickness', 0.01, 0.2, 0.005).name('Ring Thickness');
+    gui.addColor(effectConfig, 'color').name('Color');
+
+    // ============================================================
     // Main Application
     // ============================================================
     class NetworkVisualization {
@@ -562,13 +592,13 @@
           this.glCanvas.height = effectSize;
         }
 
-        // Render the effect
+        // Render the effect using config values
         this.glRenderer.render(time * 0.5, {
-          noiseScale: 2.5,
-          noiseAmplitude: 0.12,
-          ringRadius: effectRadius / (effectSize / 2), // Normalize to -1 to 1 space
-          ringThickness: 0.04,
-          color: [0.91, 0.27, 0.38]
+          noiseScale: effectConfig.noiseScale,
+          noiseAmplitude: effectConfig.noiseAmplitude,
+          ringRadius: effectConfig.ringRadius * (effectRadius / (effectSize / 2)), // Scale by normalized radius
+          ringThickness: effectConfig.ringThickness,
+          color: hexToRgb(effectConfig.color)
         });
 
         // Blit to main canvas
