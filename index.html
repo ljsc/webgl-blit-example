@@ -611,6 +611,23 @@
       lineHeight: 24,  // Height of the rendered connection strip in pixels
     };
 
+    const hoverHighlightConfig = {
+      enabled: true,
+      // Hovered node settings
+      hoveredNodeGlowColor: '#ffffff',
+      hoveredNodeGlowIntensity: 0.8,
+      hoveredNodeGlowRadius: 15,
+      // Connected nodes settings
+      connectedNodeGlowColor: '#88ccff',
+      connectedNodeGlowIntensity: 0.4,
+      connectedNodeGlowRadius: 10,
+      // Connection highlight settings
+      connectionHighlightColor: '#88ccff',
+      connectionHighlightWidth: 4,
+      connectionGlowIntensity: 0.6,
+      connectionGlowRadius: 8,
+    };
+
     // Helper to convert hex color to RGB array
     function hexToRgb(hex) {
       const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -643,6 +660,26 @@
     connectionFolder.addColor(connectionEffectConfig, 'color').name('Color');
     connectionFolder.add(connectionEffectConfig, 'lineHeight', 8, 48, 2).name('Line Height');
 
+    // Hover highlight folder
+    const hoverFolder = gui.addFolder('Hover Highlight');
+    hoverFolder.add(hoverHighlightConfig, 'enabled').name('Enabled');
+    // Hovered node subfolder
+    const hoveredNodeFolder = hoverFolder.addFolder('Hovered Node');
+    hoveredNodeFolder.addColor(hoverHighlightConfig, 'hoveredNodeGlowColor').name('Glow Color');
+    hoveredNodeFolder.add(hoverHighlightConfig, 'hoveredNodeGlowIntensity', 0.0, 1.5, 0.05).name('Glow Intensity');
+    hoveredNodeFolder.add(hoverHighlightConfig, 'hoveredNodeGlowRadius', 5, 30, 1).name('Glow Radius');
+    // Connected nodes subfolder
+    const connectedNodeFolder = hoverFolder.addFolder('Connected Nodes');
+    connectedNodeFolder.addColor(hoverHighlightConfig, 'connectedNodeGlowColor').name('Glow Color');
+    connectedNodeFolder.add(hoverHighlightConfig, 'connectedNodeGlowIntensity', 0.0, 1.0, 0.05).name('Glow Intensity');
+    connectedNodeFolder.add(hoverHighlightConfig, 'connectedNodeGlowRadius', 3, 20, 1).name('Glow Radius');
+    // Connection highlight subfolder
+    const connectionHighlightFolder = hoverFolder.addFolder('Connections');
+    connectionHighlightFolder.addColor(hoverHighlightConfig, 'connectionHighlightColor').name('Highlight Color');
+    connectionHighlightFolder.add(hoverHighlightConfig, 'connectionHighlightWidth', 1, 10, 0.5).name('Line Width');
+    connectionHighlightFolder.add(hoverHighlightConfig, 'connectionGlowIntensity', 0.0, 1.5, 0.05).name('Glow Intensity');
+    connectionHighlightFolder.add(hoverHighlightConfig, 'connectionGlowRadius', 2, 20, 1).name('Glow Radius');
+
     // ============================================================
     // Main Application
     // ============================================================
@@ -658,16 +695,44 @@
 
         this.draggedNode = null;
         this.dragOffset = { x: 0, y: 0 };
+        this.hoveredNode = null;
+
+        // Pre-compute adjacency lists for hover highlighting
+        this.adjacencyMap = this.buildAdjacencyMap();
 
         this.setupEventListeners();
         this.animate(0);
+      }
+
+      buildAdjacencyMap() {
+        // Build a map: nodeId -> { connectedNodes: Set, connections: Array }
+        const map = new Map();
+        for (const node of nodes) {
+          map.set(node.id, { connectedNodes: new Set(), connections: [] });
+        }
+        for (const [fromId, toId] of connections) {
+          map.get(fromId).connectedNodes.add(toId);
+          map.get(fromId).connections.push([fromId, toId]);
+          map.get(toId).connectedNodes.add(fromId);
+          map.get(toId).connections.push([fromId, toId]);
+        }
+        return map;
+      }
+
+      getConnectedNodesAndConnections(nodeId) {
+        const entry = this.adjacencyMap.get(nodeId);
+        if (!entry) return { connectedNodes: [], connections: [] };
+        return {
+          connectedNodes: Array.from(entry.connectedNodes).map(id => nodes[id]),
+          connections: entry.connections
+        };
       }
 
       setupEventListeners() {
         this.mainCanvas.addEventListener('mousedown', this.onMouseDown.bind(this));
         this.mainCanvas.addEventListener('mousemove', this.onMouseMove.bind(this));
         this.mainCanvas.addEventListener('mouseup', this.onMouseUp.bind(this));
-        this.mainCanvas.addEventListener('mouseleave', this.onMouseUp.bind(this));
+        this.mainCanvas.addEventListener('mouseleave', this.onMouseLeave.bind(this));
 
         // Touch support
         this.mainCanvas.addEventListener('touchstart', this.onTouchStart.bind(this));
@@ -718,8 +783,9 @@
       }
 
       onMouseMove(e) {
+        const pos = this.getMousePos(e);
+
         if (this.draggedNode) {
-          const pos = this.getMousePos(e);
           this.draggedNode.x = pos.x - this.dragOffset.x;
           this.draggedNode.y = pos.y - this.dragOffset.y;
 
@@ -727,11 +793,19 @@
           const r = this.draggedNode.radius;
           this.draggedNode.x = Math.max(r, Math.min(this.mainCanvas.width - r, this.draggedNode.x));
           this.draggedNode.y = Math.max(r, Math.min(this.mainCanvas.height - r, this.draggedNode.y));
+        } else {
+          // Track hover state when not dragging
+          this.hoveredNode = this.findNodeAt(pos);
         }
       }
 
       onMouseUp() {
         this.draggedNode = null;
+      }
+
+      onMouseLeave() {
+        this.draggedNode = null;
+        this.hoveredNode = null;
       }
 
       onTouchStart(e) {
@@ -829,6 +903,78 @@
         }
       }
 
+      drawHighlightedConnections(highlightedConnections) {
+        if (!hoverHighlightConfig.enabled || highlightedConnections.length === 0) return;
+
+        const ctx = this.ctx;
+        const config = hoverHighlightConfig;
+
+        for (const [fromId, toId] of highlightedConnections) {
+          const from = nodes[fromId];
+          const to = nodes[toId];
+
+          // Draw outer glow (multiple passes for softer glow)
+          ctx.save();
+          ctx.lineCap = 'round';
+
+          // Glow layers (outer to inner)
+          const glowLayers = 4;
+          for (let i = glowLayers; i >= 1; i--) {
+            const alpha = (config.connectionGlowIntensity / glowLayers) * (1 - i / (glowLayers + 1));
+            const width = config.connectionHighlightWidth + config.connectionGlowRadius * (i / glowLayers);
+
+            ctx.beginPath();
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(to.x, to.y);
+            ctx.strokeStyle = config.connectionHighlightColor;
+            ctx.globalAlpha = alpha;
+            ctx.lineWidth = width;
+            ctx.stroke();
+          }
+
+          // Core line
+          ctx.beginPath();
+          ctx.moveTo(from.x, from.y);
+          ctx.lineTo(to.x, to.y);
+          ctx.strokeStyle = config.connectionHighlightColor;
+          ctx.globalAlpha = 1.0;
+          ctx.lineWidth = config.connectionHighlightWidth;
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      }
+
+      drawNodeHighlight(node, color, intensity, radius) {
+        if (!hoverHighlightConfig.enabled || intensity <= 0) return;
+
+        const ctx = this.ctx;
+        const outerRadius = node.radius + radius;
+
+        // Draw glow using radial gradient
+        const gradient = ctx.createRadialGradient(
+          node.x, node.y, node.radius * 0.8,
+          node.x, node.y, outerRadius
+        );
+
+        // Parse the hex color
+        const rgb = hexToRgb(color);
+        const r = Math.round(rgb[0] * 255);
+        const g = Math.round(rgb[1] * 255);
+        const b = Math.round(rgb[2] * 255);
+
+        gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${intensity})`);
+        gradient.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${intensity * 0.5})`);
+        gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, outerRadius, 0, Math.PI * 2);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+        ctx.restore();
+      }
+
       drawNode(node) {
         const ctx = this.ctx;
 
@@ -893,8 +1039,20 @@
         ctx.fillStyle = '#16213e';
         ctx.fillRect(0, 0, this.mainCanvas.width, this.mainCanvas.height);
 
+        // Get hover state data
+        let highlightedConnections = [];
+        let connectedNodes = [];
+        if (this.hoveredNode && hoverHighlightConfig.enabled) {
+          const hoverData = this.getConnectedNodesAndConnections(this.hoveredNode.id);
+          highlightedConnections = hoverData.connections;
+          connectedNodes = hoverData.connectedNodes;
+        }
+
         // Draw connections first (behind nodes)
         this.drawConnections();
+
+        // Draw highlighted connections (above base connections)
+        this.drawHighlightedConnections(highlightedConnections);
 
         // Draw connection flow effects (above base connections)
         this.drawConnectionEffects(time);
@@ -904,6 +1062,26 @@
           if (node.active) {
             this.drawActiveEffect(node, time);
           }
+        }
+
+        // Draw hover highlights on connected nodes
+        for (const node of connectedNodes) {
+          this.drawNodeHighlight(
+            node,
+            hoverHighlightConfig.connectedNodeGlowColor,
+            hoverHighlightConfig.connectedNodeGlowIntensity,
+            hoverHighlightConfig.connectedNodeGlowRadius
+          );
+        }
+
+        // Draw hover highlight on hovered node itself
+        if (this.hoveredNode) {
+          this.drawNodeHighlight(
+            this.hoveredNode,
+            hoverHighlightConfig.hoveredNodeGlowColor,
+            hoverHighlightConfig.hoveredNodeGlowIntensity,
+            hoverHighlightConfig.hoveredNodeGlowRadius
+          );
         }
 
         // Draw all nodes
