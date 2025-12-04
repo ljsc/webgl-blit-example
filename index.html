@@ -73,8 +73,8 @@
       box-shadow: 0 0 8px #e94560;
     }
 
-    /* Hidden WebGL canvas for offscreen rendering */
-    #glCanvas {
+    /* Hidden WebGL canvases for offscreen rendering */
+    #glCanvas, #connectionGlCanvas {
       display: none;
     }
   </style>
@@ -83,6 +83,7 @@
   <div class="container">
     <canvas id="mainCanvas" width="900" height="600"></canvas>
     <canvas id="glCanvas" width="128" height="128"></canvas>
+    <canvas id="connectionGlCanvas" width="256" height="32"></canvas>
     <div class="legend">
       <div class="legend-item">
         <div class="legend-dot normal"></div>
@@ -247,6 +248,85 @@
     `;
 
     // ============================================================
+    // Connection Flow Fragment Shader
+    // ============================================================
+    const connectionFragmentShaderSource = `
+      precision highp float;
+
+      varying vec2 v_uv;
+      uniform float u_time;
+      uniform float u_speed;
+      uniform float u_particleCount;
+      uniform float u_particleSize;
+      uniform float u_glowIntensity;
+      uniform float u_trailLength;
+      uniform vec3 u_color;
+
+      ${noiseGLSL}
+
+      void main() {
+        // UV coordinates: x runs along the connection (0 to 1), y is perpendicular (-0.5 to 0.5 centered)
+        vec2 uv = v_uv;
+        float yDist = abs(uv.y - 0.5); // Distance from center line
+
+        float alpha = 0.0;
+        vec3 finalColor = u_color;
+
+        // Draw multiple particles traveling along the connection
+        for (float i = 0.0; i < 10.0; i++) {
+          if (i >= u_particleCount) break;
+
+          // Each particle has a different phase offset
+          float phase = i / u_particleCount;
+
+          // Particle position along x-axis (0 to 1), animated over time
+          float particleX = fract(u_time * u_speed + phase);
+
+          // Add slight noise to particle path for organic feel
+          float noiseOffset = snoise(vec3(i * 10.0, u_time * 0.5, 0.0)) * 0.03;
+          float particleY = 0.5 + noiseOffset;
+
+          // Distance from current fragment to particle center
+          vec2 particlePos = vec2(particleX, particleY);
+          vec2 diff = uv - particlePos;
+
+          // Account for aspect ratio (connection is elongated)
+          diff.x *= 4.0; // Adjust for typical aspect ratio
+
+          float distToParticle = length(diff);
+
+          // Particle core with soft edges
+          float particle = 1.0 - smoothstep(0.0, u_particleSize, distToParticle);
+
+          // Trailing glow behind particle (in direction of travel)
+          float behindParticle = max(0.0, particleX - uv.x);
+          float trail = exp(-behindParticle / u_trailLength) * (1.0 - smoothstep(0.0, 0.15, yDist));
+          trail *= step(0.0, particleX - uv.x); // Only behind the particle
+          trail *= smoothstep(0.0, 0.05, particleX); // Fade in at start
+
+          // Combine particle and trail
+          alpha += particle * 1.2 + trail * u_glowIntensity * 0.3;
+
+          // Subtle color variation per particle
+          float colorVar = sin(i * 2.5) * 0.1;
+          finalColor += vec3(colorVar, colorVar * 0.5, -colorVar * 0.3) * particle;
+        }
+
+        // Add a subtle base line glow
+        float lineGlow = exp(-yDist * 20.0) * 0.15;
+        alpha += lineGlow;
+
+        // Add edge fade for smooth connection endpoints
+        float edgeFade = smoothstep(0.0, 0.08, uv.x) * smoothstep(0.0, 0.08, 1.0 - uv.x);
+        alpha *= edgeFade;
+
+        alpha = clamp(alpha, 0.0, 1.0);
+
+        gl_FragColor = vec4(finalColor, alpha);
+      }
+    `;
+
+    // ============================================================
     // WebGL Initialization
     // ============================================================
     class WebGLEffectRenderer {
@@ -361,6 +441,125 @@
     }
 
     // ============================================================
+    // Connection Effect WebGL Renderer
+    // ============================================================
+    class ConnectionEffectRenderer {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.gl = canvas.getContext('webgl', {
+          alpha: true,
+          premultipliedAlpha: false
+        });
+
+        if (!this.gl) {
+          throw new Error('WebGL not supported');
+        }
+
+        this.initShaders();
+        this.initBuffers();
+        this.initUniforms();
+      }
+
+      initShaders() {
+        const gl = this.gl;
+
+        // Compile vertex shader (reuse the same vertex shader)
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertexShader, vertexShaderSource);
+        gl.compileShader(vertexShader);
+
+        if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+          console.error('Vertex shader error:', gl.getShaderInfoLog(vertexShader));
+        }
+
+        // Compile connection fragment shader
+        const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fragmentShader, connectionFragmentShaderSource);
+        gl.compileShader(fragmentShader);
+
+        if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+          console.error('Connection fragment shader error:', gl.getShaderInfoLog(fragmentShader));
+        }
+
+        // Link program
+        this.program = gl.createProgram();
+        gl.attachShader(this.program, vertexShader);
+        gl.attachShader(this.program, fragmentShader);
+        gl.linkProgram(this.program);
+
+        if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+          console.error('Program link error:', gl.getProgramInfoLog(this.program));
+        }
+
+        gl.useProgram(this.program);
+      }
+
+      initBuffers() {
+        const gl = this.gl;
+
+        // Full-screen quad
+        const positions = new Float32Array([
+          -1, -1,
+           1, -1,
+          -1,  1,
+           1,  1,
+        ]);
+
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        const positionLoc = gl.getAttribLocation(this.program, 'a_position');
+        gl.enableVertexAttribArray(positionLoc);
+        gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+      }
+
+      initUniforms() {
+        const gl = this.gl;
+        this.uniforms = {
+          time: gl.getUniformLocation(this.program, 'u_time'),
+          speed: gl.getUniformLocation(this.program, 'u_speed'),
+          particleCount: gl.getUniformLocation(this.program, 'u_particleCount'),
+          particleSize: gl.getUniformLocation(this.program, 'u_particleSize'),
+          glowIntensity: gl.getUniformLocation(this.program, 'u_glowIntensity'),
+          trailLength: gl.getUniformLocation(this.program, 'u_trailLength'),
+          color: gl.getUniformLocation(this.program, 'u_color'),
+        };
+      }
+
+      render(time, options = {}) {
+        const gl = this.gl;
+        const {
+          speed = 0.3,
+          particleCount = 4,
+          particleSize = 0.08,
+          glowIntensity = 0.8,
+          trailLength = 0.15,
+          color = [0.29, 0.56, 0.89], // Blue-ish
+        } = options;
+
+        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        gl.useProgram(this.program);
+
+        gl.uniform1f(this.uniforms.time, time);
+        gl.uniform1f(this.uniforms.speed, speed);
+        gl.uniform1f(this.uniforms.particleCount, particleCount);
+        gl.uniform1f(this.uniforms.particleSize, particleSize);
+        gl.uniform1f(this.uniforms.glowIntensity, glowIntensity);
+        gl.uniform1f(this.uniforms.trailLength, trailLength);
+        gl.uniform3fv(this.uniforms.color, color);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
+
+    // ============================================================
     // Graph Data & Node Management
     // ============================================================
     const nodes = [
@@ -401,6 +600,17 @@
       color: '#e94560',
     };
 
+    const connectionEffectConfig = {
+      enabled: true,
+      speed: 0.25,
+      particleCount: 4,
+      particleSize: 0.06,
+      glowIntensity: 0.8,
+      trailLength: 0.12,
+      color: '#4a9fff',
+      lineHeight: 24,  // Height of the rendered connection strip in pixels
+    };
+
     // Helper to convert hex color to RGB array
     function hexToRgb(hex) {
       const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -413,11 +623,25 @@
 
     // Initialize lil-gui
     const gui = new lil.GUI({ title: 'Effect Controls' });
-    gui.add(effectConfig, 'noiseScale', 0.5, 8.0, 0.1).name('Noise Scale');
-    gui.add(effectConfig, 'noiseAmplitude', 0.0, 0.5, 0.01).name('Noise Amplitude');
-    gui.add(effectConfig, 'ringRadius', 0.3, 1.2, 0.01).name('Ring Radius');
-    gui.add(effectConfig, 'ringThickness', 0.01, 0.2, 0.005).name('Ring Thickness');
-    gui.addColor(effectConfig, 'color').name('Color');
+
+    // Node effect folder
+    const nodeFolder = gui.addFolder('Node Effects');
+    nodeFolder.add(effectConfig, 'noiseScale', 0.5, 8.0, 0.1).name('Noise Scale');
+    nodeFolder.add(effectConfig, 'noiseAmplitude', 0.0, 0.5, 0.01).name('Noise Amplitude');
+    nodeFolder.add(effectConfig, 'ringRadius', 0.3, 1.2, 0.01).name('Ring Radius');
+    nodeFolder.add(effectConfig, 'ringThickness', 0.01, 0.2, 0.005).name('Ring Thickness');
+    nodeFolder.addColor(effectConfig, 'color').name('Color');
+
+    // Connection effect folder
+    const connectionFolder = gui.addFolder('Connection Flow');
+    connectionFolder.add(connectionEffectConfig, 'enabled').name('Enabled');
+    connectionFolder.add(connectionEffectConfig, 'speed', 0.05, 1.0, 0.01).name('Speed');
+    connectionFolder.add(connectionEffectConfig, 'particleCount', 1, 10, 1).name('Particle Count');
+    connectionFolder.add(connectionEffectConfig, 'particleSize', 0.02, 0.2, 0.01).name('Particle Size');
+    connectionFolder.add(connectionEffectConfig, 'glowIntensity', 0.0, 2.0, 0.1).name('Glow Intensity');
+    connectionFolder.add(connectionEffectConfig, 'trailLength', 0.02, 0.4, 0.01).name('Trail Length');
+    connectionFolder.addColor(connectionEffectConfig, 'color').name('Color');
+    connectionFolder.add(connectionEffectConfig, 'lineHeight', 8, 48, 2).name('Line Height');
 
     // ============================================================
     // Main Application
@@ -427,8 +651,10 @@
         this.mainCanvas = document.getElementById('mainCanvas');
         this.ctx = this.mainCanvas.getContext('2d');
         this.glCanvas = document.getElementById('glCanvas');
+        this.connectionGlCanvas = document.getElementById('connectionGlCanvas');
 
         this.glRenderer = new WebGLEffectRenderer(this.glCanvas);
+        this.connectionRenderer = new ConnectionEffectRenderer(this.connectionGlCanvas);
 
         this.draggedNode = null;
         this.dragOffset = { x: 0, y: 0 };
@@ -550,6 +776,59 @@
         }
       }
 
+      drawConnectionEffects(time) {
+        if (!connectionEffectConfig.enabled) return;
+
+        const ctx = this.ctx;
+
+        for (const [fromId, toId] of connections) {
+          const from = nodes[fromId];
+          const to = nodes[toId];
+
+          // Calculate connection geometry
+          const dx = to.x - from.x;
+          const dy = to.y - from.y;
+          const length = Math.sqrt(dx * dx + dy * dy);
+          const angle = Math.atan2(dy, dx);
+
+          // Size the connection canvas to match the connection
+          const height = connectionEffectConfig.lineHeight;
+          const width = Math.ceil(length);
+
+          // Resize canvas if needed
+          if (this.connectionGlCanvas.width !== width || this.connectionGlCanvas.height !== height) {
+            this.connectionGlCanvas.width = width;
+            this.connectionGlCanvas.height = height;
+          }
+
+          // Render the connection effect with a unique time offset per connection
+          // to prevent all particles from being synchronized
+          const connectionOffset = (fromId * 0.17 + toId * 0.31);
+          this.connectionRenderer.render(time + connectionOffset, {
+            speed: connectionEffectConfig.speed,
+            particleCount: connectionEffectConfig.particleCount,
+            particleSize: connectionEffectConfig.particleSize,
+            glowIntensity: connectionEffectConfig.glowIntensity,
+            trailLength: connectionEffectConfig.trailLength,
+            color: hexToRgb(connectionEffectConfig.color),
+          });
+
+          // Blit the rendered effect onto the main canvas with rotation
+          ctx.save();
+
+          // Translate to the starting point of the connection
+          ctx.translate(from.x, from.y);
+
+          // Rotate to match the connection angle
+          ctx.rotate(angle);
+
+          // Draw the effect centered vertically on the connection line
+          ctx.drawImage(this.connectionGlCanvas, 0, -height / 2);
+
+          ctx.restore();
+        }
+      }
+
       drawNode(node) {
         const ctx = this.ctx;
 
@@ -616,6 +895,9 @@
 
         // Draw connections first (behind nodes)
         this.drawConnections();
+
+        // Draw connection flow effects (above base connections)
+        this.drawConnectionEffects(time);
 
         // Draw active effects (behind nodes but above connections)
         for (const node of nodes) {
